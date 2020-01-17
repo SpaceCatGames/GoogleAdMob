@@ -1,5 +1,7 @@
 Unity3D.
 
+AdMob plugin: https://developers.google.com/admob/unity/start?hl=ru
+
 Urgently need to connect advertising from Google AdMob, and time is too short to master all the pitfalls?
 
 I offer a ready-made asset that supports three types of advertising: with reward, inter-page and banner.
