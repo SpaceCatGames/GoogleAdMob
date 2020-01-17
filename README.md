@@ -1,6 +1,6 @@
 Unity3D.
 
-AdMob plugin: https://developers.google.com/admob/unity/start?hl=ru
+AdMob plugin: https://developers.google.com/admob/unity/start
 
 Urgently need to connect advertising from Google AdMob, and time is too short to master all the pitfalls?
 
