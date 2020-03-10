@@ -1,38 +1,58 @@
-﻿using System;
-using System.Collections;
-using System.Collections.Generic;
+using System;
 using GoogleMobileAds.Api;
 using UnityEngine;
 
-namespace SpaceCatGames.OpenSource.Ads
+#if ODIN_INSPECTOR
+using Sirenix.OdinInspector;
+#endif
+
+namespace SpaceCatGames.OpenSource
 {
     /// <summary>
-    /// Usage:
-    /// Create new asset, select ad type, add your ID.
+    /// Instruction for use:
     /// <para>
     /// Subscribe at callbacks
-    /// OnWatchedCallback += e => MainThreadDispatcher.Instance.Enqueue( () => Foo() );
-    /// or OnClosedCallback
+    /// e.g. OnWatchedCallback += e => Dispatcher.Instance.Enqueue( () => Foo() );    
     /// </para> 
-    /// Call InitAd(), or set InitOnEnable flag.
-    /// Call Request() any time (called into InitAd) or set true RequestNewAfterPlay flag.
+    /// Call LoadAd(), or set InitOnEnable flag.
+    /// Call LoadAd() any time or set RequestNewAfterPlay flag.
     /// <para>
-    /// Then call Play().
+    /// Then call Play() or set PlayAfterLoad flag.
+    /// </para>
+    /// <para>
+    ///  Not combine inconsistent fields for correct behavior. 
     /// </para>
     /// You are the best! 
     /// </summary>
     [CreateAssetMenu( fileName = "AdMobAsset", menuName = "SpaceCatGames/AdMobAsset" )]
     public class AdMobAsset : ScriptableObject
     {
+#if UNITY_EDITOR
+        public const double EditorAmount = 10f;
+        public const string EditorType = "Editor";
+#endif
+        
+        [Header("Behaviour")]
+        [Tooltip( "Will LoadAd() invoked at OnEnable?" )]
+        public bool InitOnEnable;
+        [Tooltip( "Will LoadAd() invoked on load/show failed?\n" +
+                  "Recommended using with checking network connectivity or not use with InitOnEnable." )]
+        public bool InitOnFailed;
+        [Tooltip( "Ad will be unload if asset disabled." )]
+        public bool UnloadOnDisable = true;
+        [Tooltip( "Will LoadAd() invoked again after Play?" )]
+        public bool RequestNewAfterPlay = true;
+        [Tooltip("Show ad after loaded.\n" +
+                 "DON'T USE with RequestNewAfterPlay!")]
+        public bool PlayAfterLoad;
+
+        [Header( "Debug" )]
         [Tooltip( "False - ads is test, true - your id" )]
         public bool IsRealAds;
         [Tooltip( "If true, called AddTestDevice(uniqueID)" )]
         public bool IsTest = true;
-        [Tooltip( "Will InitAd() invoked at OnEnable?" )]
-        public bool InitOnEnable;
-        [Tooltip( "Will Request() invoked again after Play?" )]
-        public bool RequestNewAfterPlay = true;
 
+        [Header("Options")]
         [Tooltip( "Type of ads" )]
         public AdType AdType;
 
@@ -48,8 +68,8 @@ namespace SpaceCatGames.OpenSource.Ads
         /// <summary> Ad position for BannerView type </summary>
         [SerializeField]
 #if ODIN_INSPECTOR
-        [Sirenix.OdinInspector.ShowIf( "AdType", AdType.BannerView )]
-#endif
+        [ShowIf( "AdType", AdType.BannerView )]
+#endif  
         [Tooltip( "Ad position for BannerView type" )]
         protected AdPosition AdPosition = AdPosition.Center;
 
@@ -57,6 +77,14 @@ namespace SpaceCatGames.OpenSource.Ads
         private BannerView bannerView;
         private InterstitialAd interstitialAd;
         private string currentAdVideoId;
+
+        /// <summary>
+        /// Unique device ID
+        /// </summary>
+        private static string UniqueID;
+
+         /// <summary> Invoked on loaded </summary>
+        public event Action OnLoadedCallback;
 
         /// <summary> Invoked on failed (load or show), arg is message </summary>
         public event Action<string> OnFailedCallback;
@@ -91,10 +119,13 @@ namespace SpaceCatGames.OpenSource.Ads
             }
         }
 
-        /// <summary> Is ad initialized? </summary>
+        /// <summary> Was ad initialized? </summary>
         public bool IsInitialized => AdObject != null;
 
-        /// <summary> Is ad loaded? </summary>
+        /// <summary> Is ad loading now? </summary>
+        public bool IsLoading { get; private set; }
+
+        /// <summary> Is ad loaded and ready for play? </summary>
         public bool IsLoaded
         {
             get
@@ -118,6 +149,9 @@ namespace SpaceCatGames.OpenSource.Ads
 
         protected void OnDisable()
         {
+            if ( !UnloadOnDisable )
+                    return;
+
             if ( Application.isPlaying )
                 Debug.Log( $"AdMob asset {name} was disabled. Ad unloaded." );
             rewardedAd = null;
@@ -130,9 +164,7 @@ namespace SpaceCatGames.OpenSource.Ads
 #if UNITY_EDITOR
             if ( !UnityEditor.EditorApplication.isPlayingOrWillChangePlaymode )
                 return;
-#endif
-
-#if DEBUG
+#elif DEBUG
             IsTest = true;
 #endif
 
@@ -144,12 +176,21 @@ namespace SpaceCatGames.OpenSource.Ads
 
             if ( InitOnEnable )
             {
-                InitAd();
+                LoadAd();
+            }
+
+            if ( IsTest && UniqueID == null )
+            {
+                UniqueID = SystemInfo.deviceUniqueIdentifier;
             }
         }
 
-        public void InitAd()
+        /// <summary>
+        /// Ad initialization and loading
+        /// </summary>
+        public void LoadAd()
         {
+            IsLoading = true;
             currentAdVideoId = GetVideoID();
             switch ( AdType )
             {
@@ -167,6 +208,9 @@ namespace SpaceCatGames.OpenSource.Ads
             }
         }
 
+        /// <summary>
+        /// Check IsLoaded before then call this method
+        /// </summary>
         public void Play()
         {
             switch ( AdType )
@@ -185,26 +229,40 @@ namespace SpaceCatGames.OpenSource.Ads
             }
 
             if ( RequestNewAfterPlay )
-                Request();
+                 LoadAd();
 
 #if UNITY_EDITOR
             HandleUserEarnedReward( AdObject,
-                new Reward { Amount = 10d, Type = "Editor" } );
+                new Reward { Amount = EditorAmount, Type = EditorType } );
 #endif
         }
 
-        public void Request()
+        /// <summary>
+        /// Hides the BannerView from the screen
+        /// </summary>
+        public void BannerHide()
+        {
+            if ( AdType == AdType.BannerView )
+            {
+                bannerView.Hide();
+            }
+        }
+
+        /// <summary>
+        /// Request for load ad
+        /// </summary>
+        private void Request()
         {
             var builder = new AdRequest.Builder();
             if ( IsTest )
             {
-                builder
+                 builder
                     .AddTestDevice( AdRequest.TestDeviceSimulator )
-                    .AddTestDevice( SystemInfo.deviceUniqueIdentifier );
+                    .AddTestDevice( UniqueID );
             }
 
             var adRequest = builder.Build();
-
+            
             switch ( AdType )
             {
                 case AdType.RewardVideoAd:
@@ -270,18 +328,22 @@ namespace SpaceCatGames.OpenSource.Ads
             rewardedAd = new RewardedAd( currentAdVideoId );
 
             rewardedAd.OnUserEarnedReward += HandleUserEarnedReward;
+            rewardedAd.OnAdOpening += HandleUserOpening;
+            rewardedAd.OnAdLoaded += HandleUserLoaded;
             rewardedAd.OnAdFailedToLoad += HandleUserFailed;
             rewardedAd.OnAdFailedToShow += HandleUserFailed;
             rewardedAd.OnAdClosed += HandleRewardedAdClosed;
 
             Request();
-        }
+        }       
 
         private void InitBannerView()
         {
             bannerView = new BannerView( currentAdVideoId, AdSize, AdPosition );
 
             bannerView.OnAdFailedToLoad += HandleUserFailed;
+            bannerView.OnAdOpening += HandleUserOpening;
+            bannerView.OnAdLoaded += HandleUserLoaded;
             bannerView.OnAdLeavingApplication += HandleLeavingApplication;
             bannerView.OnAdClosed += HandleRewardedAdClosed;
 
@@ -293,6 +355,8 @@ namespace SpaceCatGames.OpenSource.Ads
             interstitialAd = new InterstitialAd( currentAdVideoId );
 
             interstitialAd.OnAdFailedToLoad += HandleUserFailed;
+            interstitialAd.OnAdOpening += HandleUserOpening;
+            interstitialAd.OnAdLoaded += HandleUserLoaded;
             interstitialAd.OnAdLeavingApplication += HandleLeavingApplication;
             interstitialAd.OnAdClosed += HandleRewardedAdClosed;
 
@@ -302,6 +366,22 @@ namespace SpaceCatGames.OpenSource.Ads
 #endregion
 
 #region Video callbacks
+
+        private void HandleUserOpening( object sender, EventArgs e )
+        {
+           
+        }
+
+        private void HandleUserLoaded( object sender, EventArgs e )
+        {
+            IsLoading = false;
+            OnLoadedCallback?.Invoke();
+
+            if ( PlayAfterLoad )
+            {
+                Play();
+            }
+        }
 
         private void HandleRewardedAdClosed( object sender, EventArgs e )
         {
@@ -322,16 +402,28 @@ namespace SpaceCatGames.OpenSource.Ads
         {
             Debug.Log( $"Ad loading: FAILED. Message: {e.Message}" );
 
+            IsLoading = false;
             Amount = 0;
             OnFailedCallback?.Invoke( e.Message );
+            
+            if ( InitOnFailed )
+            {
+                LoadAd();
+            }
         }
 
         private void HandleUserFailed( object sender, AdFailedToLoadEventArgs e )
         {
             Debug.Log( $"Ad loading: FAILED. Message: {e.Message}" );
-
+            
+            IsLoading = false;
             Amount = 0;
             OnFailedCallback?.Invoke( e.Message );
+            
+            if ( InitOnFailed )
+            {
+                LoadAd();
+            }
         }
 
         private void HandleLeavingApplication( object sender, EventArgs e )
