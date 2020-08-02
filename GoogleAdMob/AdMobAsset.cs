@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using GoogleMobileAds.Api;
 using UnityEngine;
 
@@ -10,17 +11,10 @@ namespace SpaceCatGames.OpenSource
 {
     /// <summary>
     /// Instruction for use:
-    /// <para>
-    /// Subscribe at callbacks
-    /// e.g. OnWatchedCallback += e => Dispatcher.Instance.Enqueue( () => Foo() );    
-    /// </para> 
     /// Call LoadAd(), or set InitOnEnable flag.
     /// Call LoadAd() any time or set RequestNewAfterPlay flag.
     /// <para>
     /// Then call Play() or set PlayAfterLoad flag.
-    /// </para>
-    /// <para>
-    ///  Not combine inconsistent fields for correct behavior. 
     /// </para>
     /// You are the best! 
     /// </summary>
@@ -31,20 +25,24 @@ namespace SpaceCatGames.OpenSource
         public const double EditorAmount = 10f;
         public const string EditorType = "Editor";
 #endif
+        private static MainThreadDispatcher mainThread;
         
         [Header("Behaviour")]
         [Tooltip( "Will LoadAd() invoked at OnEnable?" )]
         public bool InitOnEnable;
-        [Tooltip( "Will LoadAd() invoked on load/show failed?\n" +
-                  "Recommended using with checking network connectivity or not use with InitOnEnable." )]
+        [Tooltip( "Will LoadAd() invoked on load/show failed?" )]
         public bool InitOnFailed;
+        [Tooltip( "Will ad loaded on Play (if not loaded)?" )]
+        public bool InitOnPlay = true;
         [Tooltip( "Ad will be unload if asset disabled." )]
         public bool UnloadOnDisable = true;
         [Tooltip( "Will LoadAd() invoked again after Play?" )]
         public bool RequestNewAfterPlay = true;
-        [Tooltip("Show ad after loaded.\n" +
-                 "DON'T USE with RequestNewAfterPlay!")]
-        public bool PlayAfterLoad;
+        [Tooltip( "Show ad after loaded. " +
+                  "For example, you can change this option (by your code) for auto play ad." )]
+        public bool AutoPlayAfterLoaded;
+
+        private bool loadingAfterPlay;
 
         [Header( "Debug" )]
         [Tooltip( "False - ads is test, true - your id" )]
@@ -71,7 +69,7 @@ namespace SpaceCatGames.OpenSource
         [ShowIf( "AdType", AdType.BannerView )]
 #endif  
         [Tooltip( "Ad position for BannerView type" )]
-        protected AdPosition AdPosition = AdPosition.Center;
+        public AdPosition AdPosition = AdPosition.Center;
 
         private RewardedAd rewardedAd;
         private BannerView bannerView;
@@ -119,6 +117,17 @@ namespace SpaceCatGames.OpenSource
             }
         }
 
+        /// <summary>
+        /// Functions for WaitWhile coroutine before try to LoadAd().
+        /// Default is <see cref="Application.internetReachability"/>
+        /// </summary>
+        public Func<bool> WaitForLoadFunctions = () => Application.internetReachability == NetworkReachability.NotReachable;
+
+        /// <summary>
+        /// Waiting for <see cref="WaitForLoadFunctions"/> now
+        /// </summary>
+        public bool WaitingForLoad { get; private set; }
+
         /// <summary> Was ad initialized? </summary>
         public bool IsInitialized => AdObject != null;
 
@@ -149,6 +158,9 @@ namespace SpaceCatGames.OpenSource
 
         protected void OnDisable()
         {
+            IsLoading = false;
+            WaitingForLoad = false;
+
             if ( !UnloadOnDisable )
                     return;
 
@@ -167,6 +179,11 @@ namespace SpaceCatGames.OpenSource
 #elif DEBUG
             IsTest = true;
 #endif
+
+            if ( mainThread == null )
+            {
+                mainThread = MainThreadDispatcher.Instance;
+            }
 
             if ( Application.installMode == ApplicationInstallMode.Store )
             {
@@ -190,7 +207,20 @@ namespace SpaceCatGames.OpenSource
         /// </summary>
         public void LoadAd()
         {
+            if ( WaitingForLoad )
+            {
+                return;
+            }
+
+            if ( !IsLoading && WaitForLoadFunctions() )
+            {
+                WaitingForLoad = true;
+                mainThread.StartCoroutine( Wait() );
+                return;
+            }
+
             IsLoading = true;
+            
             currentAdVideoId = GetVideoID();
             switch ( AdType )
             {
@@ -209,14 +239,27 @@ namespace SpaceCatGames.OpenSource
         }
 
         /// <summary>
-        /// Check IsLoaded before then call this method
+        /// Show ad
         /// </summary>
         public void Play()
         {
+            if ( !IsLoaded )
+            {
+                if ( InitOnPlay && !IsLoading )
+                {
+                    LoadAd();
+                }
+                return;
+            }
+
             switch ( AdType )
             {
                 case AdType.RewardVideoAd:
                     rewardedAd.Show();
+#if UNITY_EDITOR
+                    HandleUserEarnedReward( AdObject,
+                        new Reward { Amount = EditorAmount, Type = EditorType } );
+#endif
                     break;
                 case AdType.BannerView:
                     bannerView.Show();
@@ -228,13 +271,13 @@ namespace SpaceCatGames.OpenSource
                     throw new ArgumentOutOfRangeException();
             }
 
-            if ( RequestNewAfterPlay )
-                 LoadAd();
+            if ( !RequestNewAfterPlay ) 
+                return;
+            if ( loadingAfterPlay )
+                return;
 
-#if UNITY_EDITOR
-            HandleUserEarnedReward( AdObject,
-                new Reward { Amount = EditorAmount, Type = EditorType } );
-#endif
+            loadingAfterPlay = true;
+            LoadAd();
         }
 
         /// <summary>
@@ -365,6 +408,13 @@ namespace SpaceCatGames.OpenSource
 
 #endregion
 
+        private IEnumerator Wait()
+        {
+            yield return new WaitWhile( WaitForLoadFunctions );
+            WaitingForLoad = false;
+            LoadAd();
+        }
+
 #region Video callbacks
 
         private void HandleUserOpening( object sender, EventArgs e )
@@ -375,19 +425,20 @@ namespace SpaceCatGames.OpenSource
         private void HandleUserLoaded( object sender, EventArgs e )
         {
             IsLoading = false;
-            OnLoadedCallback?.Invoke();
+            mainThread.Enqueue( () => OnLoadedCallback?.Invoke() );
 
-            if ( PlayAfterLoad )
+            if ( AutoPlayAfterLoaded && !loadingAfterPlay )
             {
                 Play();
             }
+            loadingAfterPlay = false;
         }
 
         private void HandleRewardedAdClosed( object sender, EventArgs e )
         {
             Debug.Log( "Ad watching: CLOSED" );
 
-            OnClosedCallback?.Invoke();
+            mainThread.Enqueue( () => OnClosedCallback?.Invoke() );
         }
 
         private void HandleUserEarnedReward( object sender, Reward e )
@@ -395,7 +446,8 @@ namespace SpaceCatGames.OpenSource
             Debug.Log( $"Ad watching: SUCCESS {e.Type}: {e.Amount}" );
 
             Amount = e.Amount;
-            OnWatchedCallback?.Invoke( Amount );
+
+            mainThread.Enqueue( () => OnWatchedCallback?.Invoke( Amount ) );
         }
 
         private void HandleUserFailed( object sender, AdErrorEventArgs e )
@@ -404,7 +456,7 @@ namespace SpaceCatGames.OpenSource
 
             IsLoading = false;
             Amount = 0;
-            OnFailedCallback?.Invoke( e.Message );
+            mainThread.Enqueue( () => OnFailedCallback?.Invoke( e.Message ) );
             
             if ( InitOnFailed )
             {
@@ -418,7 +470,7 @@ namespace SpaceCatGames.OpenSource
             
             IsLoading = false;
             Amount = 0;
-            OnFailedCallback?.Invoke( e.Message );
+            mainThread.Enqueue( () => OnFailedCallback?.Invoke( e.Message ) );
             
             if ( InitOnFailed )
             {
